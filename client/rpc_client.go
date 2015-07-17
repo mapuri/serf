@@ -2,15 +2,17 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
-	"github.com/hashicorp/go-msgpack/codec"
-	"github.com/hashicorp/logutils"
-	"github.com/hashicorp/serf/coordinate"
 	"log"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/hashicorp/go-msgpack/codec"
+	"github.com/hashicorp/logutils"
+	"github.com/hashicorp/serf/coordinate"
 )
 
 const (
@@ -473,8 +475,69 @@ type streamHandler struct {
 	closed  bool
 	init    bool
 	initCh  chan<- error
-	eventCh chan<- map[string]interface{}
+	eventCh chan<- EventRecord
 	seq     uint64
+}
+
+func decodeMemberEventRecord(buf []byte) (EventRecord, error) {
+	var mer MemberEventRecord
+	handle := codec.MsgpackHandle{RawToString: true, WriteExt: true}
+	if err := codec.NewDecoder(bytes.NewReader(buf), &handle).Decode(&mer); err != nil {
+		log.Printf("decoding failed")
+		return nil, err
+	}
+	return EventRecord(mer), nil
+}
+
+func decodeUserEventRecord(buf []byte) (EventRecord, error) {
+	var uer UserEventRecord
+	handle := codec.MsgpackHandle{RawToString: true, WriteExt: true}
+	if err := codec.NewDecoder(bytes.NewReader(buf), &handle).Decode(&uer); err != nil {
+		log.Printf("decoding failed")
+		return nil, err
+	}
+	return EventRecord(uer), nil
+}
+
+func decodeQueryEventRecord(buf []byte) (EventRecord, error) {
+	var qr QueryEventRecord
+	handle := codec.MsgpackHandle{RawToString: true, WriteExt: true}
+	if err := codec.NewDecoder(bytes.NewReader(buf), &handle).Decode(&qr); err != nil {
+		log.Printf("decoding failed")
+		return nil, err
+	}
+	return EventRecord(qr), nil
+}
+
+func extractEvent(rec map[string]interface{}) (EventRecord, error) {
+	// encode to a byte stream
+	buf := bytes.NewBuffer(nil)
+	handle := codec.MsgpackHandle{RawToString: true, WriteExt: true}
+	encoder := codec.NewEncoder(buf, &handle)
+	if err := encoder.Encode(rec); err != nil {
+		log.Printf("encoding failed")
+		return nil, err
+	}
+
+	// decode back to appropriate struc
+	switch rec["Event"] {
+	case "member-join":
+		fallthrough
+	case "member-leave":
+		fallthrough
+	case "member-failed":
+		fallthrough
+	case "member-update":
+		fallthrough
+	case "member-reap":
+		return decodeMemberEventRecord(buf.Bytes())
+	case "user":
+		return decodeUserEventRecord(buf.Bytes())
+	case "query":
+		return decodeQueryEventRecord(buf.Bytes())
+	default:
+		return nil, fmt.Errorf("unhandled event type: %s", rec["Event"])
+	}
 }
 
 func (sh *streamHandler) Handle(resp *responseHeader) {
@@ -486,14 +549,26 @@ func (sh *streamHandler) Handle(resp *responseHeader) {
 	}
 
 	// Decode logs for all other responses
-	var rec map[string]interface{}
+	var (
+		rec map[string]interface{}
+		e   interface{}
+		err error
+	)
+
 	if err := sh.client.dec.Decode(&rec); err != nil {
 		log.Printf("[ERR] Failed to decode stream record: %v", err)
 		sh.client.deregisterHandler(sh.seq)
 		return
 	}
+
+	if e, err = extractEvent(rec); err != nil {
+		log.Printf("[ERR] Failed to decode record to event: %v", err)
+		sh.client.deregisterHandler(sh.seq)
+		return
+	}
+
 	select {
-	case sh.eventCh <- rec:
+	case sh.eventCh <- e:
 	default:
 		log.Printf("[ERR] Dropping event! Stream channel full")
 	}
@@ -513,7 +588,7 @@ func (sh *streamHandler) Cleanup() {
 }
 
 // Stream is used to subscribe to events
-func (c *RPCClient) Stream(filter string, ch chan<- map[string]interface{}) (StreamHandle, error) {
+func (c *RPCClient) Stream(filter string, ch chan<- EventRecord) (StreamHandle, error) {
 	// Setup the request
 	seq := c.getSeq()
 	header := requestHeader{

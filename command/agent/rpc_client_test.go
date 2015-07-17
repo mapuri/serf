@@ -3,15 +3,16 @@ package agent
 import (
 	"bytes"
 	"encoding/base64"
-	"github.com/hashicorp/serf/client"
-	"github.com/hashicorp/serf/serf"
-	"github.com/hashicorp/serf/testutil"
 	"io"
 	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/serf/client"
+	"github.com/hashicorp/serf/serf"
+	"github.com/hashicorp/serf/testutil"
 )
 
 func testRPCClient(t *testing.T) (*client.RPCClient, *Agent, *AgentIPC) {
@@ -408,25 +409,25 @@ func TestRPCClientMonitor(t *testing.T) {
 }
 
 func TestRPCClientStream_User(t *testing.T) {
-	client, a1, ipc := testRPCClient(t)
+	c1, a1, ipc := testRPCClient(t)
 	defer ipc.Shutdown()
-	defer client.Close()
+	defer c1.Close()
 	defer a1.Shutdown()
 
 	if err := a1.Start(); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
-	eventCh := make(chan map[string]interface{}, 64)
-	if handle, err := client.Stream("user", eventCh); err != nil {
+	eventCh := make(chan client.EventRecord, 64)
+	if handle, err := c1.Stream("user", eventCh); err != nil {
 		t.Fatalf("err: %s", err)
 	} else {
-		defer client.Stop(handle)
+		defer c1.Stop(handle)
 	}
 
 	testutil.Yield()
 
-	if err := client.UserEvent("deploy", []byte("foo"), false); err != nil {
+	if err := c1.UserEvent("deploy", []byte("foo"), false); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
@@ -434,19 +435,24 @@ func TestRPCClientStream_User(t *testing.T) {
 
 	select {
 	case e := <-eventCh:
-		if e["Event"].(string) != "user" {
+		if _, ok := e.(client.UserEventRecord); !ok {
 			t.Fatalf("bad event: %#v", e)
 		}
-		if e["LTime"].(int64) != 1 {
+		ue := e.(client.UserEventRecord)
+
+		if ue.Event != "user" {
 			t.Fatalf("bad event: %#v", e)
 		}
-		if e["Name"].(string) != "deploy" {
+		if ue.LTime != 1 {
 			t.Fatalf("bad event: %#v", e)
 		}
-		if bytes.Compare(e["Payload"].([]byte), []byte("foo")) != 0 {
+		if ue.Name != "deploy" {
 			t.Fatalf("bad event: %#v", e)
 		}
-		if e["Coalesce"].(bool) != false {
+		if bytes.Compare(ue.Payload, []byte("foo")) != 0 {
+			t.Fatalf("bad event: %#v", e)
+		}
+		if ue.Coalesce != false {
 			t.Fatalf("bad event: %#v", e)
 		}
 
@@ -456,9 +462,9 @@ func TestRPCClientStream_User(t *testing.T) {
 }
 
 func TestRPCClientStream_Member(t *testing.T) {
-	client, a1, ipc := testRPCClient(t)
+	c1, a1, ipc := testRPCClient(t)
 	defer ipc.Shutdown()
-	defer client.Close()
+	defer c1.Close()
 	defer a1.Shutdown()
 	a2 := testAgent(nil)
 	defer a2.Shutdown()
@@ -473,11 +479,11 @@ func TestRPCClientStream_Member(t *testing.T) {
 
 	testutil.Yield()
 
-	eventCh := make(chan map[string]interface{}, 64)
-	if handle, err := client.Stream("*", eventCh); err != nil {
+	eventCh := make(chan client.EventRecord, 64)
+	if handle, err := c1.Stream("*", eventCh); err != nil {
 		t.Fatalf("err: %s", err)
 	} else {
-		defer client.Stop(handle)
+		defer c1.Stop(handle)
 	}
 
 	testutil.Yield()
@@ -491,47 +497,22 @@ func TestRPCClientStream_Member(t *testing.T) {
 
 	select {
 	case e := <-eventCh:
-		if e["Event"].(string) != "member-join" {
+		if _, ok := e.(client.MemberEventRecord); !ok {
 			t.Fatalf("bad event: %#v", e)
 		}
 
-		members := e["Members"].([]interface{})
+		me := e.(client.MemberEventRecord)
+		if me.Event != "member-join" {
+			t.Fatalf("bad event: %#v", e)
+		}
+
+		members := me.Members
 		if len(members) != 1 {
 			t.Fatalf("should have 1 member")
 		}
-		member := members[0].(map[interface{}]interface{})
+		member := members[0]
 
-		if _, ok := member["Name"].(string); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["Addr"].([]uint8); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["Port"].(uint64); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["Tags"].(map[interface{}]interface{}); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if stat, _ := member["Status"].(string); stat != "alive" {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["ProtocolMin"].(int64); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["ProtocolMax"].(int64); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["ProtocolCur"].(int64); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["DelegateMin"].(int64); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["DelegateMax"].(int64); !ok {
-			t.Fatalf("bad event: %#v", e)
-		}
-		if _, ok := member["DelegateCur"].(int64); !ok {
+		if stat := member.Status; stat != "alive" {
 			t.Fatalf("bad event: %#v", e)
 		}
 
@@ -665,7 +646,7 @@ func TestRPCClientStream_Query(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 
-	eventCh := make(chan map[string]interface{}, 64)
+	eventCh := make(chan client.EventRecord, 64)
 	if handle, err := cl.Stream("query", eventCh); err != nil {
 		t.Fatalf("err: %s", err)
 	} else {
@@ -687,19 +668,24 @@ func TestRPCClientStream_Query(t *testing.T) {
 
 	select {
 	case e := <-eventCh:
-		if e["Event"].(string) != "query" {
+		if _, ok := e.(client.QueryEventRecord); !ok {
 			t.Fatalf("bad query: %#v", e)
 		}
-		if e["ID"].(int64) != 1 {
+		qe := e.(client.QueryEventRecord)
+
+		if qe.Event != "query" {
+			t.Fatalf("bad event: %#v", e)
+		}
+		if qe.ID != 1 {
 			t.Fatalf("bad query: %#v", e)
 		}
-		if e["LTime"].(int64) != 1 {
+		if qe.LTime != 1 {
 			t.Fatalf("bad query: %#v", e)
 		}
-		if e["Name"].(string) != "deploy" {
+		if qe.Name != "deploy" {
 			t.Fatalf("bad query: %#v", e)
 		}
-		if bytes.Compare(e["Payload"].([]byte), []byte("foo")) != 0 {
+		if bytes.Compare(qe.Payload, []byte("foo")) != 0 {
 			t.Fatalf("bad query: %#v", e)
 		}
 
@@ -718,7 +704,7 @@ func TestRPCClientStream_Query_Respond(t *testing.T) {
 		t.Fatalf("err: %s", err)
 	}
 
-	eventCh := make(chan map[string]interface{}, 64)
+	eventCh := make(chan client.EventRecord, 64)
 	if handle, err := cl.Stream("query", eventCh); err != nil {
 		t.Fatalf("err: %s", err)
 	} else {
@@ -744,15 +730,17 @@ func TestRPCClientStream_Query_Respond(t *testing.T) {
 
 	select {
 	case e := <-eventCh:
-		if e["Event"].(string) != "query" {
+		if _, ok := e.(client.QueryEventRecord); !ok {
 			t.Fatalf("bad query: %#v", e)
 		}
-		if e["Name"].(string) != "ping" {
+		qe := e.(client.QueryEventRecord)
+
+		if qe.Name != "ping" {
 			t.Fatalf("bad query: %#v", e)
 		}
 
 		// Send a response
-		id := e["ID"].(int64)
+		id := qe.ID
 		if err := cl.Respond(uint64(id), []byte("pong")); err != nil {
 			t.Fatalf("err: %v", err)
 		}

@@ -1,12 +1,15 @@
 package command
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/hashicorp/logutils"
-	"github.com/mitchellh/cli"
 	"strings"
 	"sync"
+
+	"github.com/hashicorp/logutils"
+	"github.com/hashicorp/serf/client"
+	"github.com/mitchellh/cli"
 )
 
 // MonitorCommand is a Command implementation that queries a running
@@ -49,28 +52,28 @@ func (c *MonitorCommand) Run(args []string) int {
 		return 1
 	}
 
-	client, err := RPCClient(*rpcAddr, *rpcAuth)
+	rpcc, err := RPCClient(*rpcAddr, *rpcAuth)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Error connecting to Serf agent: %s", err))
 		return 1
 	}
-	defer client.Close()
+	defer rpcc.Close()
 
-	eventCh := make(chan map[string]interface{}, 1024)
-	streamHandle, err := client.Stream("*", eventCh)
+	eventCh := make(chan client.EventRecord, 1024)
+	streamHandle, err := rpcc.Stream("*", eventCh)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Error starting stream: %s", err))
 		return 1
 	}
-	defer client.Stop(streamHandle)
+	defer rpcc.Stop(streamHandle)
 
 	logCh := make(chan string, 1024)
-	monHandle, err := client.Monitor(logutils.LogLevel(logLevel), logCh)
+	monHandle, err := rpcc.Monitor(logutils.LogLevel(logLevel), logCh)
 	if err != nil {
 		c.Ui.Error(fmt.Sprintf("Error starting monitor: %s", err))
 		return 1
 	}
-	defer client.Stop(monHandle)
+	defer rpcc.Stop(monHandle)
 
 	eventDoneCh := make(chan struct{})
 	go func() {
@@ -88,9 +91,9 @@ func (c *MonitorCommand) Run(args []string) int {
 					break OUTER
 				}
 				c.Ui.Info("Event Info:")
-				for key, val := range event {
-					c.Ui.Info(fmt.Sprintf("\t%s: %#v", key, val))
-				}
+				// basic pretty print
+				infoStr, _ := json.MarshalIndent(event, "", "\t")
+				c.Ui.Info(fmt.Sprintf("\t%s", strings.Trim(string(infoStr), "{}")))
 			}
 		}
 

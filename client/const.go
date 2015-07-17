@@ -1,10 +1,11 @@
 package client
 
 import (
-	"github.com/hashicorp/serf/coordinate"
-	"github.com/hashicorp/serf/serf"
 	"net"
 	"time"
+
+	"github.com/hashicorp/serf/coordinate"
+	"github.com/hashicorp/serf/serf"
 )
 
 const (
@@ -170,7 +171,8 @@ type logRecord struct {
 	Log string
 }
 
-type userEventRecord struct {
+// UserEventRecord is used to represent information about a user event
+type UserEventRecord struct {
 	Event    string
 	LTime    serf.LamportTime
 	Name     string
@@ -194,7 +196,21 @@ type Member struct {
 	DelegateCur uint8 // Currently set Serf protocol
 }
 
-type memberEventRecord struct {
+// MemberEventRecord is used to represent information about member events
+type MemberEventRecord struct {
 	Event   string
 	Members []Member
 }
+
+// QueryEventRecord is used to represent information about user query request
+type QueryEventRecord struct {
+	Event   string
+	ID      uint64 // ID is opaque to client, used to respond
+	LTime   serf.LamportTime
+	Name    string
+	Payload []byte
+}
+
+// EventRecord is an interface for member or user events and queries that are
+// streamed to a serf client
+type EventRecord interface{}
